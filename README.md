@@ -4,26 +4,12 @@ Monthly LinkedIn engagement reporting for the **Vision RT** and **SGRT
 Community** pages: likes / comments / reposts for the most recent full month,
 plus a second pass that strips out Vision RT employees' interactions.
 
-Two single-file deliverables, split by what each half can actually do:
+One single-file executable: **`socialmetrics.py`**.
 
-| File | Role | Network |
+| Subcommand | Role | Network |
 |---|---|---|
-| `socialmetrics.py` | **Acquisition + analysis.** `fetch` pulls posts+engagement from LinkedIn; `analyze` builds the report. | `fetch` needs LinkedIn access; `analyze` is offline |
-| `socialmetrics.html` | **Analysis only**, fully in-browser. Drop in a CSV, get the report. | None — never touches the network |
-
-## Why acquisition is a `.py`, not the browser
-
-A plain HTML page **cannot** read LinkedIn using your logged-in session: the
-browser's Same-Origin Policy blocks any non-`linkedin.com` page from making
-authenticated requests to LinkedIn and reading the response with your cookies.
-That is a deliberate security boundary, not a configuration gap. So all
-acquisition lives in `socialmetrics.py fetch`, which uses the official
-LinkedIn Community Management API with a proper token.
-
-`socialmetrics.html` exists purely so the **analysis** can run anywhere with
-zero setup — load the CSV that `fetch` (or a LinkedIn page-admin export)
-produced. Its engine is a verified line-for-line port of the Python one
-(identical outputs on the sample data).
+| `fetch` | Pull posts + engagement from LinkedIn into a posts CSV | Needs LinkedIn access |
+| `analyze` | Aggregate the CSV(s) into the monthly report | Offline |
 
 ## LinkedIn access requirements for `fetch`
 
@@ -55,10 +41,8 @@ Pull Vision RT only, then analyze (run `fetch` where LinkedIn is reachable):
 
 Add `--channel "SGRT Community=urn:li:organization:<ID>"` (repeatable) to
 include more channels. `--month` defaults to the most recent full calendar
-month.
-
-Browser analysis: open `socialmetrics.html`, pick the posts CSV (and optional
-interactions CSV), click **Analyze**, download the report.
+month. Omit `--interactions` to report from post-level totals only (no
+employee-stripped pass).
 
 ## Input formats
 
