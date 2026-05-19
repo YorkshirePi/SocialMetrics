@@ -1,0 +1,11 @@
+channel,post_id,interaction_type,actor_name,actor_employer
+Vision RT,urn:li:share:1001,like,Alice Stone,Vision RT
+Vision RT,urn:li:share:1001,like,Dr Raj Patel,Memorial Cancer Center
+Vision RT,urn:li:share:1001,comment,Bob Lee,Vision RT Ltd
+Vision RT,urn:li:share:1001,repost,Sara Kim,University Hospital
+Vision RT,urn:li:share:1002,like,Tom Reed,Radiation Oncology Associates
+Vision RT,urn:li:share:1002,comment,Alice Stone,Vision RT
+SGRT Community,urn:li:share:2001,like,Jane Doe,NHS Trust
+SGRT Community,urn:li:share:2001,comment,Bob Lee,Vision RT Ltd
+SGRT Community,urn:li:share:2002,like,Chris Vale,Vision RT
+SGRT Community,urn:li:share:2002,repost,Mona Diaz,Independent Clinic
