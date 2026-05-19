@@ -26,7 +26,9 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as _dt
+import getpass
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -408,14 +410,45 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_token(args: argparse.Namespace) -> str:
+    """Token precedence: --token > $LINKEDIN_TOKEN > interactive prompt.
+
+    The interactive prompt uses getpass so the token is not echoed to the
+    terminal or shell history.
+    """
+    if args.token:
+        return args.token
+    env = os.environ.get("LINKEDIN_TOKEN")
+    if env:
+        return env
+    try:
+        return getpass.getpass(
+            "LinkedIn 3-legged access token (input hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("\nNo token provided; aborting.")
+
+
+def _resolve_org_urn(args: argparse.Namespace) -> dict[str, str]:
+    if args.channel:
+        return _parse_channels(args.channel)
+    urn = args.vision_rt_urn
+    if not urn:
+        try:
+            urn = input("Vision RT organization URN "
+                        "(e.g. urn:li:organization:12345): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\nNo organization URN provided; aborting.")
+    return {"Vision RT": urn}
+
+
 def _cmd_fetch(args: argparse.Namespace) -> int:
     year, month = _parse_month(args.month)
-    channels = (_parse_channels(args.channel) if args.channel
-                else {"Vision RT": args.vision_rt_urn})
+    channels = _resolve_org_urn(args)
     if not all(channels.values()):
-        raise SystemExit("Provide --channel LABEL=URN or --vision-rt-urn.")
+        raise SystemExit("An organization URN is required.")
+    token = _resolve_token(args)
     try:
-        client = LinkedInClient(args.token)
+        client = LinkedInClient(token)
         n = client.export_posts(channels, year, month, args.out)
     except LinkedInError as exc:
         print(f"LinkedIn fetch failed: {exc}", file=sys.stderr)
@@ -440,7 +473,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=_cmd_analyze)
 
     f = sub.add_parser("fetch", help="pull posts+engagement from LinkedIn")
-    f.add_argument("--token", required=True)
+    f.add_argument("--token", help="3-legged access token. If omitted, falls "
+                   "back to $LINKEDIN_TOKEN, then a hidden interactive prompt.")
     f.add_argument("--channel", action="append",
                    help="repeatable; LABEL=urn:li:organization:ID. "
                         "Defaults to Vision RT only via --vision-rt-urn.")
