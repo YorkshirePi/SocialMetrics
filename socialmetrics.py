@@ -29,15 +29,18 @@ import datetime as _dt
 import getpass
 import json
 import os
+import secrets
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Iterable
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # --------------------------------------------------------------------------- #
 # Analysis core
@@ -276,6 +279,120 @@ def write_csv(result: AnalysisResult, path: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# OAuth 2.0 Authorization Code flow (3-legged)
+# --------------------------------------------------------------------------- #
+
+_AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
+_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
+_DEFAULT_SCOPES = "r_organization_social rw_organization_admin"
+
+
+class OAuthError(RuntimeError):
+    pass
+
+
+def _capture_authorization_code(redirect_uri: str, expected_state: str) -> str:
+    """Run a one-shot local HTTP server on the redirect URI and return the
+    authorization code LinkedIn sends back."""
+    parts = urllib.parse.urlparse(redirect_uri)
+    host = parts.hostname or "localhost"
+    port = parts.port or 80
+    callback_path = parts.path or "/"
+    captured: dict[str, str | None] = {"code": None, "error": None}
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            u = urllib.parse.urlparse(self.path)
+            if u.path != callback_path:
+                self.send_response(404)
+                self.end_headers()
+                return
+            q = urllib.parse.parse_qs(u.query)
+            if q.get("state", [None])[0] != expected_state:
+                captured["error"] = "state mismatch (possible CSRF)"
+            else:
+                captured["code"] = q.get("code", [None])[0]
+                captured["error"] = q.get("error_description",
+                                          q.get("error", [None]))[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(
+                b"<h3>Authorization received. You can close this tab and "
+                b"return to the terminal.</h3>")
+
+        def log_message(self, *args):  # silence access log
+            pass
+
+    httpd = HTTPServer((host, port), _Handler)
+    try:
+        while captured["code"] is None and captured["error"] is None:
+            httpd.handle_request()
+    finally:
+        httpd.server_close()
+    if captured["code"]:
+        return captured["code"]
+    raise OAuthError(f"Authorization failed: {captured['error']}")
+
+
+def oauth_login(client_id: str, client_secret: str, redirect_uri: str,
+                scopes: str, open_browser: bool = True) -> str:
+    """Full Authorization Code exchange. Returns an access token.
+
+    Requires network egress to www.linkedin.com and that ``redirect_uri`` is
+    registered under the app's Authorized redirect URLs. The requested scopes
+    must be ones the app is approved for (e.g. Community Management API).
+    """
+    if not client_id or not client_secret:
+        raise OAuthError("client id and client secret are both required.")
+    state = secrets.token_urlsafe(24)
+    auth_url = _AUTH_URL + "?" + urllib.parse.urlencode({
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "scope": scopes,
+    })
+    print("\n1. Authorize this app in your browser (you are already logged "
+          "into LinkedIn there):\n")
+    print("   " + auth_url + "\n")
+    if open_browser:
+        try:
+            webbrowser.open(auth_url)
+        except Exception:
+            pass
+    print(f"2. Waiting for the redirect to {redirect_uri} ...")
+    code = _capture_authorization_code(redirect_uri, state)
+
+    print("3. Exchanging authorization code for an access token ...")
+    body = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }).encode()
+    req = urllib.request.Request(
+        _TOKEN_URL, data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise OAuthError(
+            f"Token exchange HTTP {exc.code}: "
+            f"{exc.read().decode('utf-8', 'replace')}") from exc
+    except urllib.error.URLError as exc:
+        raise OAuthError(
+            f"Network error reaching {_TOKEN_URL}: {exc}. "
+            "Confirm egress to www.linkedin.com is allowed.") from exc
+    token = payload.get("access_token")
+    if not token:
+        raise OAuthError(f"No access_token in response: {payload}")
+    return token
+
+
+# --------------------------------------------------------------------------- #
 # LinkedIn Community Management API client
 # --------------------------------------------------------------------------- #
 
@@ -410,20 +527,53 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_token(args: argparse.Namespace) -> str:
-    """Token precedence: --token > $LINKEDIN_TOKEN > interactive prompt.
+def _prompt(label: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        val = input(f"{label}{suffix}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit(f"\nNo {label} provided; aborting.")
+    return val or (default or "")
 
-    The interactive prompt uses getpass so the token is not echoed to the
-    terminal or shell history.
+
+def _resolve_oauth_creds(args: argparse.Namespace) -> tuple[str, str, str, str]:
+    client_id = (args.client_id or os.environ.get("LINKEDIN_CLIENT_ID")
+                 or _prompt("LinkedIn client id"))
+    client_secret = (args.client_secret
+                     or os.environ.get("LINKEDIN_CLIENT_SECRET"))
+    if not client_secret:
+        try:
+            client_secret = getpass.getpass(
+                "LinkedIn client secret (input hidden): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\nNo client secret provided; aborting.")
+    redirect_uri = args.redirect_uri or "http://localhost:8765/callback"
+    scopes = args.scopes or _DEFAULT_SCOPES
+    return client_id, client_secret, redirect_uri, scopes
+
+
+def _resolve_token(args: argparse.Namespace) -> str:
+    """Token precedence:
+      --token > $LINKEDIN_TOKEN > OAuth Authorization Code login > prompt.
+
+    The OAuth path runs the full 3-legged flow (client id/secret + browser
+    authorization + code exchange) so no pre-minted token is needed.
     """
     if args.token:
         return args.token
     env = os.environ.get("LINKEDIN_TOKEN")
     if env:
         return env
+    if not args.no_login:
+        try:
+            cid, secret, redirect, scopes = _resolve_oauth_creds(args)
+            return oauth_login(cid, secret, redirect, scopes,
+                               open_browser=not args.no_browser)
+        except OAuthError as exc:
+            raise SystemExit(f"OAuth login failed: {exc}")
     try:
         return getpass.getpass(
-            "LinkedIn 3-legged access token (input hidden): ").strip()
+            "LinkedIn access token (input hidden): ").strip()
     except (EOFError, KeyboardInterrupt):
         raise SystemExit("\nNo token provided; aborting.")
 
@@ -457,10 +607,42 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_oauth_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--client-id",
+                        help="LinkedIn app client id ($LINKEDIN_CLIENT_ID)")
+    parser.add_argument("--client-secret",
+                        help="LinkedIn app client secret "
+                             "($LINKEDIN_CLIENT_SECRET); prompted hidden if unset")
+    parser.add_argument("--redirect-uri",
+                        help="must be registered in the app's Authorized "
+                             "redirect URLs (default http://localhost:8765/callback)")
+    parser.add_argument("--scopes",
+                        help=f"OAuth scopes (default: {_DEFAULT_SCOPES!r})")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="print the auth URL instead of opening a browser")
+
+
+def _cmd_auth(args: argparse.Namespace) -> int:
+    try:
+        cid, secret, redirect, scopes = _resolve_oauth_creds(args)
+        token = oauth_login(cid, secret, redirect, scopes,
+                            open_browser=not args.no_browser)
+    except OAuthError as exc:
+        print(f"OAuth login failed: {exc}", file=sys.stderr)
+        return 2
+    print("\nAccess token obtained. Export it for `fetch`:\n")
+    print(f"  export LINKEDIN_TOKEN='{token}'\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="socialmetrics")
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="command", required=True)
+
+    au = sub.add_parser("auth", help="run the OAuth flow and print a token")
+    _add_oauth_args(au)
+    au.set_defaults(func=_cmd_auth)
 
     a = sub.add_parser("analyze", help="aggregate a posts CSV into a report")
     a.add_argument("--posts", required=True)
@@ -473,8 +655,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=_cmd_analyze)
 
     f = sub.add_parser("fetch", help="pull posts+engagement from LinkedIn")
-    f.add_argument("--token", help="3-legged access token. If omitted, falls "
-                   "back to $LINKEDIN_TOKEN, then a hidden interactive prompt.")
+    f.add_argument("--token", help="access token. If omitted: $LINKEDIN_TOKEN, "
+                   "then the OAuth login flow, then a hidden prompt.")
+    f.add_argument("--no-login", action="store_true",
+                   help="skip the OAuth flow; use a pre-minted token only")
+    _add_oauth_args(f)
     f.add_argument("--channel", action="append",
                    help="repeatable; LABEL=urn:li:organization:ID. "
                         "Defaults to Vision RT only via --vision-rt-urn.")
