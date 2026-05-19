@@ -4,8 +4,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from socialmetrics.analyze import (analyze, load_interactions, load_posts,
-                                    most_recent_full_month, posts_in_month)
+from socialmetrics import (analyze, load_interactions, load_posts,
+                           most_recent_full_month, posts_in_month)
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
